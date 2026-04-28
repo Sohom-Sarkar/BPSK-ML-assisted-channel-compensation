@@ -1,0 +1,8 @@
+non_ideality,phase_offset
+param_name,degrees
+param_value,0
+message_id,1
+message,qwertyuiopasdfghjklzxcvbnm
+base_amp,0.00097
+sigma_i,0.000675
+sigma_q,0.000679

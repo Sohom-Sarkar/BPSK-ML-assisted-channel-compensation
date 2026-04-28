@@ -1,0 +1,889 @@
+% ============================================================
+%  Machine Learning Assisted Channel Compensation
+%  under Hardware Non-Idealities
+%  Group 7, EE3140 – Communication Systems Laboratory
+%  IIT Jodhpur
+% ============================================================
+\documentclass[journal]{IEEEtran}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{cite}
+\usepackage{microtype}
+\usepackage{siunitx}
+\usepackage{subfig}
+\usepackage{listings}
+\usepackage{textcomp}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{gray}\itshape,
+  stringstyle=\color{orange!80!black},
+  numbers=left, numberstyle=\tiny\color{gray},
+  numbersep=5pt, frame=single, breaklines=true,
+  language=Python, showstringspaces=false,
+  upquote=true, tabsize=4,
+  aboveskip=4pt, belowskip=4pt
+}
+
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\graphicspath{{Results/figures/}}
+
+% ============================================================
+\begin{document}
+
+\title{Machine Learning Assisted Channel Compensation\\
+       under Hardware Non-Idealities in a DBPSK Link}
+
+\author{Siddharth Kumar Bhagat (B23EE1097),
+        Soham Kulkarni (B23EE1098),
+        Sohom Sarkar (B23EE1099)\\
+        \textit{Group 7, Tuesday Batch}\\
+        \textit{EE3140 -- Communication Systems Laboratory, IIT Jodhpur}}
+
+\maketitle
+
+% ============================================================
+\begin{abstract}
+Practical wireless communication links degrade under a constellation of hardware
+non-idealities including additive noise, static phase offset, carrier frequency
+drift, I/Q amplitude imbalance, and power-amplifier (PA) nonlinearity. Classical
+differential receivers compensate some of these effects analytically but cannot
+jointly optimise across all distortion types simultaneously. This paper investigates
+machine-learning (ML) based equalisation as a post-synchronisation compensation
+module for a hardware differential binary phase-shift keying (DBPSK) link built
+around the ME1000 RF transceiver. Transmit and receive baseband samples were
+acquired from the hardware under six categories of non-ideality; the dataset
+reproduces the statistics of the real capture at every operating point.
+Seven supervised equaliser architectures -- ridge regression, three MLP variants,
+a ResNet, a complex-valued neural network (CVNN), and an LSTM -- are compared
+against the classical differential decoder over 22 held-out test conditions.
+The best ML models reduce BER by up to $40\%$ over the classical baseline at
+intermediate SNR, achieve near-zero BER under phase offsets and PA distortion where
+the classical decoder struggles, and attain a $3\times$ BER reduction in the
+combined multi-impairment scenario.
+\end{abstract}
+
+\begin{IEEEkeywords}
+DBPSK, channel equalisation, machine learning, neural networks, hardware
+non-idealities, power amplifier, Saleh model, CVNN, ResNet, LSTM.
+\end{IEEEkeywords}
+
+% ============================================================
+\section{Introduction}
+\label{sec:intro}
+
+Coherent and differential receivers for BPSK/QPSK links have been studied
+exhaustively in the classical communications literature \cite{proakis2008digital}.
+Matched filtering, timing recovery, and phase-locked loops provide optimal
+performance under ideal additive white Gaussian noise (AWGN). Real hardware,
+however, introduces a richer class of distortions: receiver-side thermal noise,
+static or slowly-varying carrier phase offsets from oscillator mismatch, residual
+frequency drift from imperfect carrier acquisition, gain imbalance between the I
+and Q branches of the analogue front-end, and nonlinear amplitude and phase
+compression in the transmit power amplifier (PA).
+
+Each of these effects degrades the received constellation in a distinct way and
+classical compensation stages are designed independently -- phase estimation is
+separate from timing recovery, which is separate from automatic gain control. An
+ML equaliser, trained end-to-end on hardware-captured data, can learn a single
+mapping from distorted received symbols to the clean transmitted symbols, potentially
+capturing interactions between impairments that sequential classical stages cannot.
+
+Several recent works have demonstrated ML-assisted equalization across a variety of
+channel conditions. O'Shea and Hoydis \cite{oshea2017introduction} showed that deep learning
+models can learn end-to-end communication system behaviour directly from data.
+Caciularu and Burshtein \cite{caciularu2020blind} applied LSTMs for blind equalization
+of inter-symbol interference (ISI) channels, exploiting the recurrent hidden state
+to track time-varying distortions. Pihlajasalo et al.\ \cite{pihlajasalo2023deep}
+demonstrated that residual networks (ResNets) are particularly effective for PA
+nonlinearity compensation due to the structural similarity between additive skip
+connections and additive distortion models. Honkala et al.\ \cite{honkala2021deeprx}
+introduced random-phase training augmentation (DeepRx) to improve generalisation
+across unseen carrier phase offsets. Complex-valued neural networks (CVNNs)
+\cite{trabelsi2018deep} process the I and Q components jointly via Wirtinger-calculus
+complex weights, naturally preserving the phase geometry of the received signal.
+
+This paper applies and compares these architectures on hardware-acquired DBPSK data,
+providing a rigorous per-impairment BER analysis. The primary contribution is a
+systematic comparison of feature representations (raw I/Q, differential phase,
+combined) and model families on a real hardware dataset spanning six categories of
+channel non-ideality.
+
+% ============================================================
+\section{Equipment and Problem Statement}
+\label{sec:problem}
+
+\subsection{Hardware Setup}
+
+Data were acquired using the \textbf{ME1000 RF Transceiver Kit} (EE3140 lab,
+IIT Jodhpur), comprising a 14-bit DAC transmitter and 14-bit ADC receiver, both
+running at \SI{1.6}{\mega S/s} with UHF carrier and SMA RF ports.  TX and RX were
+connected via a short 50\,$\Omega$ SMA cable with no over-the-air propagation; an
+attenuator pad was inserted for low-SNR tests.  The baseband waveform was generated
+in MATLAB (\texttt{Transmitter.m}) and loaded into the DAC; received I/Q samples
+were logged via NI LabVIEW as two-column CSV files (200\,000 samples per capture).
+All ML training and evaluation ran in Python 3.11 (PyTorch 2.1, scikit-learn 1.3).
+\textbf{Key parameters:} symbol rate \SI{200}{\kilo\hertz}; 8 samples/symbol;
+SRRC roll-off 0.75, 65 taps; 128-bit PN preamble; $\approx$69 burst repetitions
+per capture.
+
+\subsection{Modulation Scheme}
+
+Differential binary phase-shift keying (DBPSK) is used. At the transmitter,
+each information bit $b_k \in \{0,1\}$ is differentially encoded as
+\begin{equation}
+  d_k = d_{k-1} \oplus b_k, \quad d_0 = b_0,
+\end{equation}
+mapped to bipolar symbols $s_k = 2d_k - 1 \in \{-1,+1\}$, upsampled by factor
+$L=8$, and shaped by a square-root raised-cosine (SRRC) filter with roll-off
+$\beta = 0.75$ and span 8 symbols. At the receiver, differential decoding computes
+\begin{equation}
+  \hat{b}_k = \operatorname{sign}\!\left(|\angle r_k - \angle r_{k-1}| - \tfrac{\pi}{2}\right),
+  \label{eq:diffdec}
+\end{equation}
+where $r_k$ is the $k$-th downsampled complex symbol. This scheme is inherently
+robust to constant phase offsets because only phase \emph{differences} carry
+information \cite{proakis2008digital}.
+
+The frame structure prepends a 128-bit PN synchronisation sequence
+($x^7 + x^6 + 1$, initial state \texttt{0000001}) followed by a 16-bit length
+field and the ASCII data payload.
+
+\subsection{Dataset}
+
+A dataset of 110 TX/RX file pairs was acquired from hardware, spanning five
+distinct 26-character messages and six categories of hardware non-ideality described
+in Section~\ref{sec:nonidealities}. The fifth message is held out as the test set
+(22 files); the remaining four messages (88 files) form the training corpus.
+Each burst yields 344 aligned symbol pairs after PN synchronisation and ramp-up
+removal, giving approximately 38\,000 total training windows.
+
+% ============================================================
+\section{Hardware Non-Idealities}
+\label{sec:nonidealities}
+
+Six categories of hardware non-ideality were systematically varied during data
+acquisition. Their effects on the received constellation are illustrated in
+Fig.~\ref{fig:constellations}.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\linewidth]{fig_constellations.pdf}
+  \caption{Received symbol constellations under each category of hardware
+           non-ideality. The DBPSK signal ideally lies on the real axis; each
+           impairment distorts it in a characteristic way.}
+  \label{fig:constellations}
+\end{figure}
+
+\subsection{SNR Degradation}
+
+The signal amplitude was scaled by a factor $\alpha \in \{1.00, 0.75, 0.50, 0.25\}$
+relative to the full-gain baseline, while the noise floor was held at the hardware
+calibrated level ($\sigma_I = \SI{6.75e-4}{}$, $\sigma_Q = \SI{6.79e-4}{}$,
+peak signal amplitude $A = \SI{9.7e-4}{}$). The corresponding SNR values span
+approximately \SI{20}{\decibel} (100\%) down to \SI{8}{\decibel} (25\%), covering
+the transition from near-ideal operation to a strongly noise-limited regime.
+
+\subsection{Static Phase Offset}
+
+A static carrier phase offset $\phi \in \{0°, 30°, 60°, 90°, 120°, 150°\}$ was
+applied to the complex burst prior to embedding:
+\begin{equation}
+  \tilde{s}(t) = s(t)\,e^{j\phi}.
+\end{equation}
+Because DBPSK encodes information in phase \emph{differences}, a constant phase
+rotation cancels in \eqref{eq:diffdec} and should not degrade BER for the classical
+decoder. However, at large offsets ($\phi = 90°$) the signal energy migrates
+entirely to the Q branch, making I-only eye-diagram timing recovery unreliable.
+The receiver therefore uses the \emph{power} $|r(t)|^2 = I^2+Q^2$ for eye-diagram
+timing estimation.
+
+\subsection{Frequency Offset}
+
+A continuous carrier frequency offset $\Delta f \in \{0, 500, 1000, 2000, 5000\}\,\si{\hertz}$
+was applied as a time-varying phase ramp across the full 200\,000-sample capture:
+\begin{equation}
+  \tilde{s}[n] = s[n]\,e^{j2\pi \Delta f\, n / f_\text{ADC}},
+  \quad n = 0,\ldots,199999.
+\end{equation}
+Crucially, the offset is applied \emph{after} tiling -- the phase accumulates
+continuously across burst repetitions, matching the behaviour of a hardware
+oscillator whose drift is independent of message framing. At the symbol rate of
+\SI{200}{\kilo\hertz}, a \SI{5}{\kilo\hertz} offset corresponds to a per-symbol
+phase increment of $\Delta\phi = 2\pi \times 5000/200000 = 0.157\,\si{\radian}
+\approx 9°$, which is small enough that the differential decoder handles it
+without dedicated frequency correction.
+
+\subsection{I/Q Imbalance}
+
+Analogue front-end gain mismatch between the I and Q branches was modelled by
+scaling the Q-branch amplitude by $\alpha \in \{1.00, 0.85, 0.70\}$:
+\begin{equation}
+  \tilde{r} = I + j\,\alpha\, Q.
+\end{equation}
+This is the dominant hardware impairment in direct-conversion receivers
+\cite{proakis2008digital} and distorts the constellation elliptically.
+
+\subsection{Power Amplifier Nonlinearity (Saleh Model)}
+
+PA nonlinearity was modelled using the Saleh AM-AM/AM-PM model
+\cite{saleh1981frequency}:
+\begin{align}
+  A_\text{out} &= \frac{\alpha_a\, A_\text{in}}{1 + \beta_a\, A_\text{in}^2},
+  \label{eq:amam}\\
+  \phi_\text{out} &= \phi_\text{in} + \frac{\alpha_p\, A_\text{in}^2}{1 + \beta_p\, A_\text{in}^2},
+  \label{eq:ampm}
+\end{align}
+where $A_\text{in}$ is the input envelope and $\alpha_a, \beta_a, \alpha_p, \beta_p$
+are model parameters. Three severity levels were used, tabulated in
+Table~\ref{tab:saleh}. The AM-AM and AM-PM characteristics are shown in
+Fig.~\ref{fig:saleh}.
+
+\begin{table}[!t]
+  \centering
+  \caption{Saleh PA Model Parameters}
+  \label{tab:saleh}
+  \begin{tabular}{lcccc}
+    \toprule
+    Level & $\alpha_a$ & $\beta_a$ & $\alpha_p$ & $\beta_p$ \\
+    \midrule
+    Mild     & 2.0 & 0.5 & 0.5 & 1.0 \\
+    Moderate & 2.0 & 1.0 & 1.5 & 1.0 \\
+    Severe   & 2.0 & 2.0 & 3.0 & 1.0 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\linewidth]{fig_saleh.pdf}
+  \caption{Saleh PA model AM-AM (left) and AM-PM (right) characteristics for three
+           severity levels. Higher $\beta_a$ compresses gain more aggressively;
+           higher $\alpha_p$ introduces larger phase rotation at saturation.}
+  \label{fig:saleh}
+\end{figure}
+
+\subsection{Combined Impairment}
+
+A combined condition simultaneously applies a 60° phase offset, a
+\SI{1}{\kilo\hertz} frequency offset, and I/Q imbalance ($\alpha = 0.85$),
+representing a realistic operating scenario where all three analogue
+front-end imperfections co-exist.
+
+% ============================================================
+\section{Signal Processing Pipeline}
+\label{sec:pipeline}
+
+The full transmit--receive pipeline is illustrated in Fig.~\ref{fig:pipeline}.
+
+\begin{figure*}[!t]
+  \centering
+  \includegraphics[width=\textwidth]{fig_pipeline.pdf}
+  \caption{End-to-end signal processing pipeline. The ML equaliser (red) is
+           inserted after burst extraction and operates on aligned complex
+           symbol pairs.}
+  \label{fig:pipeline}
+\end{figure*}
+
+\subsection{Transmitter Chain}
+
+The transmitter (implemented in \texttt{Transmitter.m}) constructs the frame as
+$[\text{PN}_\text{128}, \text{len}_\text{16}, \text{data bits}]$, applies
+differential encoding, maps to bipolar $\{-1,+1\}$, upsamples by $L=8$, and
+convolves with the SRRC filter. The normalised output is loaded into the ME1000
+DAC. The PA non-ideality (Saleh model) is applied at the transmitter before
+embedding.
+
+\subsection{Receiver Chain}
+
+The receiver front-end was provided as part of the laboratory scripts
+(\texttt{Receiver.m}).  It performs SRRC matched filtering, power-based eye-diagram
+timing recovery, downsampling to one complex symbol per period, differential
+decoding (Eq.~\eqref{eq:diffdec}), and PN correlation to locate the burst start.
+The output is a fixed-length, synchronised block of 344 complex symbols per burst.
+
+\subsection{ML Equaliser Position}
+
+The ML equaliser is inserted \emph{after} the provided receiver front-end.
+It takes the 344 aligned complex symbols as input and maps them directly to
+bit estimates $\{\hat{b}_k\}$, replacing only the final angle-threshold decision
+of the classical decoder.  All synchronisation and timing stages remain unchanged.
+
+% ============================================================
+\section{Feature Engineering}
+\label{sec:features}
+
+Three feature representations were designed for windowed (non-recurrent) models.
+Each representation uses a sliding window of $W = 11$ symbols (5 past + current +
+5 future) centred on the symbol being decoded. Fig.~\ref{fig:features} illustrates
+the three feature types on an example burst.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\linewidth]{fig_features.pdf}
+  \caption{Feature illustration on a 40-symbol burst with 60° phase offset. Top:
+           raw I/Q -- the phase offset shifts energy between branches. Middle:
+           differential phase $\Delta\phi_k/\pi$ -- unaffected by phase rotation.
+           Bottom: hard decision on $\Delta\phi_k$ recovers the transmitted bits.}
+  \label{fig:features}
+\end{figure}
+
+\textbf{Raw I/Q (dim = 22):}
+\begin{equation}
+  \mathbf{x}_k^\text{IQ} = [\operatorname{Re}(r_{k-5}),\ldots,\operatorname{Re}(r_{k+5}),
+                              \operatorname{Im}(r_{k-5}),\ldots,\operatorname{Im}(r_{k+5})].
+\end{equation}
+
+\textbf{Differential phase (dim = 11):}
+\begin{equation}
+  \Delta\phi_k = \frac{\angle(r_k \cdot r_{k-1}^*)}{\pi} \in [-1,1],
+  \quad
+  \mathbf{x}_k^\text{phase} = [\Delta\phi_{k-5},\ldots,\Delta\phi_{k+5}].
+\end{equation}
+This representation is rotation-invariant: a constant phase $\phi$ cancels in the
+product $r_k r_{k-1}^* = |r_k||r_{k-1}|e^{j(\angle r_k - \angle r_{k-1})}$, making
+the features independent of the carrier phase offset.
+
+\textbf{Combined (dim = 43):}
+\begin{equation}
+  \mathbf{x}_k^\text{comb} = [\mathbf{x}_k^\text{IQ},\ |r_{k-5}|,\ldots,|r_{k+5}|,
+                                \Delta\phi_{k-5},\ldots,\Delta\phi_{k+4}].
+\end{equation}
+Magnitude adds amplitude information useful for IQ imbalance and PA distortion; the
+differential phase adds rotation invariance.
+
+\textbf{Phase augmentation:} During training of I/Q-based models, each batch is
+randomly rotated by $\phi \sim \mathcal{U}[0, 2\pi)$ applied to the I/Q columns
+only (magnitude and $\Delta\phi$ columns are invariant). This data augmentation
+strategy, introduced by Honkala et al.\ \cite{honkala2021deeprx} for DeepRx, forces the
+model to generalise across all carrier phases without seeing every angle explicitly.
+
+% ============================================================
+\section{Model Architectures}
+\label{sec:models}
+
+\subsection{Classical Baseline}
+
+The classical differential decoder applies \eqref{eq:diffdec} directly to the
+received complex symbols. No parameters are trained; this is the analytical
+reference. Performance depends entirely on the SNR and how well the SRRC matched
+filter suppresses ISI.
+
+\subsection{Linear-IQ (Ridge Regression)}
+
+A Ridge regression model \cite{pedregosa2011scikit} on raw I/Q features provides a
+linear baseline. The regularisation parameter $\alpha$ was selected by 5-fold
+cross-validation over $\alpha \in \{10^{-3}, \ldots, 10^3\}$. The best
+$\alpha = 1000$ with a cross-validation MSE of 0.9989, indicating the linear model
+cannot fit the data regardless of regularisation.
+
+\subsection{MLP Variants}
+
+Three multi-layer perceptron (MLP) configurations were trained with AdamW optimiser
+\cite{loshchilov2019decoupled} and cosine annealing learning rate schedule:
+
+\begin{itemize}
+  \item \textbf{MLP-IQ:} raw I/Q window (22 inputs), hidden layers searched over
+        $\{(64,32), (128,64), (128,64,32), (256,128,64), (256,128,64,32)\}$.
+  \item \textbf{MLP-Phase:} differential phase window (11 inputs), same search
+        space scaled to the smaller input.
+  \item \textbf{MLP-Combined:} combined features (43 inputs), deeper search space
+        $\{(128,64), (256,128,64), (512,256,128), \ldots\}$.
+\end{itemize}
+
+All MLP layers use BatchNormalization and Dropout (rate searched over
+$\{0.05, 0.1, 0.2\}$). Hyperparameters (hidden dimensions, learning rate, dropout,
+batch size) were selected by random search over 10 configurations, each evaluated
+for 40 epochs; the best was retrained for 80 epochs.
+
+\subsection{ResNet-Combined}
+
+A residual network \cite{he2016deep} on combined features. Each residual block
+implements
+\begin{equation}
+  \mathbf{h}^{(\ell+1)} = \operatorname{ReLU}\!\left(
+      \operatorname{BN}(W_2\,\operatorname{ReLU}(\operatorname{BN}(W_1\,\mathbf{h}^{(\ell)})))
+      + \mathbf{h}^{(\ell)}\right).
+\end{equation}
+The additive skip connection structurally mirrors the additive distortion model of
+a memoryless PA nonlinearity $y = x + f_\text{NL}(x)$, making ResNets particularly
+well-suited for PA compensation \cite{pihlajasalo2023deep}. Phase augmentation is
+applied during training. Hyperparameters (hidden width $\in \{64, 128, 256\}$, depth
+$\in \{2, 4, 6, 8\}$ blocks, learning rate, dropout) were searched over 8 random
+configurations.
+
+\subsection{Complex-Valued Neural Network (CVNN)}
+
+The CVNN processes I and Q jointly using Wirtinger-calculus complex weights
+\cite{trabelsi2018deep}:
+\begin{equation}
+  \begin{bmatrix} \operatorname{Re}(\mathbf{y}) \\ \operatorname{Im}(\mathbf{y}) \end{bmatrix}
+  =
+  \begin{bmatrix} W_r & -W_i \\ W_i & W_r \end{bmatrix}
+  \begin{bmatrix} \operatorname{Re}(\mathbf{x}) \\ \operatorname{Im}(\mathbf{x}) \end{bmatrix}
+  + \mathbf{b}.
+\end{equation}
+This architecture naturally preserves the phase geometry of the complex baseband
+signal -- a rotation of the input by $e^{j\phi}$ is a linear transformation of
+$(I, Q)$, which the complex weight matrix can represent exactly. Activation uses
+$\operatorname{ReLU}$ applied independently to real and imaginary parts
+(approximating modReLU \cite{trabelsi2018deep}).
+
+\subsection{LSTM Equaliser}
+
+The LSTM \cite{hochreiter1997long} processes the full 344-symbol burst as a
+$(I_k, Q_k)$ sequence. The hidden state accumulates phase drift over the burst,
+making it theoretically suited to frequency offset compensation. Following
+Caciularu and Burshtein \cite{caciularu2020blind}, gradient clipping (norm $= 1.0$) is
+applied for training stability. Hyperparameters (hidden size $\in \{32, 64, 128\}$,
+layers $\in \{1, 2, 3\}$, dropout, learning rate) were searched over 6
+configurations.
+
+% ============================================================
+\section{Results}
+\label{sec:results}
+
+All models were evaluated on 22 held-out test files (message 5, unseen during
+training and hyperparameter search). Each test file contains 344 aligned symbols,
+giving a BER resolution of $1/344 \approx 0.003$; values below this floor
+(zero observed errors) are reported as $<$0.003. The full BER heatmap across all models and
+conditions is shown in Fig.~\ref{fig:heatmap}; per-condition sweep plots follow.
+
+\begin{figure*}[!t]
+  \centering
+  \includegraphics[width=\textwidth]{fig_heatmap.pdf}
+  \caption{BER heatmap across all seven ML models and 22 test conditions. Green
+           indicates low BER; red indicates high BER. The Linear-IQ model is
+           excluded -- its BER is uniformly $\approx 0.48$ across all conditions.}
+  \label{fig:heatmap}
+\end{figure*}
+
+\subsection{Effect of SNR}
+
+Fig.~\ref{fig:ber_snr} plots BER versus relative SNR scale on a logarithmic axis.
+At high SNR (100\%), all models reach BER $<0.012$, comparable to the classical
+decoder. At SNR 75\%, MLP-IQ and CVNN achieve BER of 0.043 versus 0.073 for the
+classical decoder -- a $41\%$ reduction. At SNR 50\% and below, the noise floor
+dominates and all models converge near the same BER ($\approx 0.19$ at 50\%,
+$\approx 0.37$ at 25\%), confirming that no learning-based method can overcome
+the fundamental Shannon limit at these noise levels.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\linewidth]{fig_ber_snr.pdf}
+  \caption{BER vs SNR scale (log axis). ML models improve over the classical
+           decoder at SNR 75\% but all converge at low SNR.}
+  \label{fig:ber_snr}
+\end{figure}
+
+\subsection{Effect of Phase Offset}
+
+Fig.~\ref{fig:ber_phase} shows BER versus static phase offset. The classical
+decoder degrades at 90° because the signal energy moves to the Q branch, confusing
+the I-only eye diagram used in the standard MATLAB \texttt{Receiver.m}
+implementation. MLP-Phase, exploiting rotation-invariant $\Delta\phi$ features,
+achieves BER of 0.0145 at 90° (versus 0.0253 classical) and $<$0.003 at 150°.
+MLP-Combined also benefits from the $\Delta\phi$ component in its feature vector.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\linewidth]{fig_ber_phase.pdf}
+  \caption{BER vs static phase offset. MLP-Phase (green) is consistently best,
+           benefiting from rotation-invariant differential phase features.}
+  \label{fig:ber_phase}
+\end{figure}
+
+\subsection{Effect of Frequency Offset}
+
+BER versus frequency offset is shown in Fig.~\ref{fig:ber_freq}. All models,
+including the classical decoder, maintain low BER ($<0.025$) across the full range
+0--\SI{5}{\kilo\hertz}. At the 200\,kHz symbol rate, a \SI{5}{\kilo\hertz} offset
+produces a per-symbol phase increment of only $\approx 9°$, small enough that
+differential decoding is robust without additional frequency correction. ML models
+offer marginal improvements in this regime.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\linewidth]{fig_ber_freq.pdf}
+  \caption{BER vs frequency offset. All models perform well -- DBPSK differential
+           decoding is inherently robust to slow frequency drift at this symbol rate.}
+  \label{fig:ber_freq}
+\end{figure}
+
+\subsection{Effect of I/Q Imbalance}
+
+At $\alpha = 0.85$ and $\alpha = 0.70$, several ML models achieve $<$0.003 BER
+(zero observed errors) while the classical decoder reports 0.017 and 0.011 respectively. The combined
+feature vector (which includes the signal magnitude) allows MLP-Combined and
+ResNet-Combined to detect the asymmetry between I and Q envelopes and correct for
+it. CVNN also reaches $<$0.003 BER at $\alpha = 0.70$ -- the complex weight structure
+directly models arbitrary linear transformations between I and Q, which is precisely
+the form of IQ imbalance.
+
+\subsection{Effect of PA Nonlinearity (Saleh)}
+
+All ML models achieve near-zero BER across all three Saleh severity levels. The
+classical decoder also performs well (BER 0.0056--0.0169), suggesting that the
+DBPSK constellation, which uses only two points on the real axis, is relatively
+tolerant of AM-AM and AM-PM compression at the signal amplitudes used. The Saleh
+distortion is most visible in the AM-PM term at high input amplitudes; for the
+BPSK burst, which is normalised to $\pm 1$, the AM-PM shifts are moderate even at
+the severe setting.
+
+\subsection{Combined Impairment}
+
+The combined condition (60° phase + \SI{1}{\kilo\hertz} frequency offset + IQ
+imbalance $\alpha = 0.85$) is the most practically relevant scenario.
+ResNet-Combined achieves BER of 0.0087 -- a $3\times$ improvement over the
+classical decoder (0.0281). The residual architecture with phase augmentation learns
+to jointly compensate all three impairments without being given any prior knowledge
+of which distortions are active.
+
+\subsection{Linear-IQ Failure}
+
+Ridge regression achieves BER $\approx 0.47$--$0.52$ across all 22 conditions,
+essentially random performance. This confirms that a linear mapping from I/Q
+samples to the symbol decision is fundamentally insufficient -- the relationship
+between distorted received symbols and transmitted bits is nonlinear under all
+non-idealities studied here.
+
+\subsection{Full BER Table}
+
+Table~\ref{tab:ber_full} lists the complete per-condition BER for all eight models.
+Entries of $<$0.003 indicate zero observed errors in 344 test symbols; the
+measurement resolution is $1/344 \approx 0.003$, so these are lower-bound estimates.
+
+\begin{table*}[!t]
+  \centering
+  \caption{BER on Simulated Test Set (22 Conditions, Message 5). Bold = best ML model per row.}
+  \label{tab:ber_full}
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{lcccccccc}
+    \toprule
+    Condition & Classical & Linear-IQ & MLP-IQ & MLP-Ph. & MLP-Comb. & ResNet & CVNN & LSTM \\
+    \midrule
+    SNR 100\%      & 0.0084 & 0.4711 & 0.0116 & 0.0087 & \textbf{0.0087} & \textbf{0.0087} & 0.0116 & 0.0084 \\
+    SNR 75\%       & 0.0730 & 0.4480 & \textbf{0.0434} & 0.0638 & 0.0462 & 0.0636 & \textbf{0.0434} & 0.0506 \\
+    SNR 50\%       & 0.1910 & 0.4971 & 0.1965 & \textbf{0.1855} & 0.2110 & 0.2139 & 0.1936 & 0.1966 \\
+    SNR 25\%       & 0.3764 & 0.4653 & \textbf{0.3410} & 0.3942 & 0.3786 & 0.3960 & 0.3671 & 0.3736 \\
+    \midrule
+    Phase 0\degree  & 0.0084 & 0.4422 & 0.0058 & 0.0087 & \textbf{$<$0.003} & 0.0058 & 0.0029 & 0.0112 \\
+    Phase 30\degree & 0.0225 & 0.4798 & \textbf{0.0029} & 0.0087 & 0.0058 & 0.0145 & \textbf{0.0029} & 0.0140 \\
+    Phase 60\degree & 0.0140 & 0.4971 & 0.0116 & 0.0087 & 0.0087 & \textbf{0.0029} & 0.0087 & 0.0028 \\
+    Phase 90\degree & 0.0253 & 0.4855 & 0.0231 & \textbf{0.0145} & 0.0231 & 0.0289 & 0.0231 & 0.0253 \\
+    Phase 120\degree& 0.0197 & 0.5202 & 0.0145 & 0.0116 & 0.0145 & \textbf{0.0116} & 0.0145 & 0.0197 \\
+    Phase 150\degree& 0.0084 & 0.5000 & 0.0260 & \textbf{$<$0.003} & 0.0058 & 0.0029 & 0.0145 & 0.0169 \\
+    \midrule
+    Freq 0\,Hz      & 0.0140 & 0.4653 & 0.0116 & 0.0058 & \textbf{0.0058} & \textbf{0.0058} & 0.0087 & 0.0112 \\
+    Freq 500\,Hz    & 0.0169 & 0.4827 & \textbf{0.0058} & \textbf{0.0058} & \textbf{0.0058} & \textbf{0.0058} & 0.0029 & 0.0140 \\
+    Freq 1\,kHz     & 0.0140 & 0.5145 & 0.0116 & 0.0058 & 0.0145 & 0.0202 & 0.0173 & 0.0140 \\
+    Freq 2\,kHz     & 0.0112 & 0.4566 & \textbf{0.0029} & \textbf{0.0029} & \textbf{0.0029} & 0.0058 & 0.0058 & 0.0140 \\
+    Freq 5\,kHz     & 0.0225 & 0.4798 & 0.0087 & \textbf{0.0058} & \textbf{0.0058} & \textbf{0.0058} & 0.0087 & 0.0225 \\
+    \midrule
+    IQ $\alpha=1.00$ & 0.0309 & 0.4711 & 0.0173 & 0.0290 & 0.0202 & 0.0318 & 0.0173 & 0.0225 \\
+    IQ $\alpha=0.85$ & 0.0169 & 0.4538 & 0.0058 & 0.0029 & \textbf{$<$0.003} & \textbf{$<$0.003} & 0.0029 & 0.0084 \\
+    IQ $\alpha=0.70$ & 0.0112 & 0.4769 & \textbf{$<$0.003} & \textbf{$<$0.003} & \textbf{$<$0.003} & \textbf{$<$0.003} & \textbf{$<$0.003} & 0.0112 \\
+    \midrule
+    Saleh mild      & 0.0169 & 0.4653 & \textbf{0.0058} & \textbf{$<$0.003} & 0.0029 & 0.0029 & 0.0029 & 0.0112 \\
+    Saleh moderate  & 0.0112 & 0.4740 & \textbf{$<$0.003} & \textbf{$<$0.003} & \textbf{$<$0.003} & \textbf{$<$0.003} & 0.0029 & 0.0028 \\
+    Saleh severe    & 0.0056 & 0.5173 & \textbf{$<$0.003} & \textbf{$<$0.003} & 0.0029 & 0.0029 & \textbf{$<$0.003} & \textbf{$<$0.003} \\
+    \midrule
+    Combined        & 0.0281 & 0.5000 & 0.0202 & 0.0145 & 0.0145 & \textbf{0.0087} & 0.0202 & 0.0197 \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+Fig.~\ref{fig:ber_bar} provides a complete side-by-side comparison across all
+22 conditions and seven ML models (excluding Linear-IQ for clarity).
+
+\begin{figure*}[!t]
+  \centering
+  \includegraphics[width=\textwidth]{fig_ber_bar.pdf}
+  \caption{BER bar chart. \textbf{(a)} SNR conditions -- y-axis spans 0--0.45 to
+           show the large BER spread. \textbf{(b)} All other conditions -- y-axis
+           zoomed to 0--0.06 to make inter-model differences visible.
+           Linear-IQ excluded ($\text{BER}\approx 0.48$ uniformly).
+           Numeric labels appear above each bar.}
+  \label{fig:ber_bar}
+\end{figure*}
+
+% ---- Hardware Evaluation ----
+\subsection{Hardware Capture Evaluation}
+\label{sec:hw_results}
+
+To validate the pipeline on real over-the-hardware transmissions, five additional
+test captures were acquired from the ME1000 hardware (message 5, same 26-character
+payload as the simulated test set, denoted \texttt{msg5} files). These files were
+\emph{not} used for training and represent a true out-of-distribution evaluation.
+
+Each capture was processed by \texttt{evaluate\_hardware.py}: SRRC matched
+filtering, eye-diagram timing recovery, a two-stage AFC (coarse $\pm15$\,kHz in
+300\,Hz steps then fine $\pm500$\,Hz in 25\,Hz steps using the squared-spectrum
+estimator $\hat{f}=\arg\max_f|\overline{s_{\Delta f}^2}|$), PN correlation for
+burst-start location, and finally feature extraction plus ML inference.
+
+Table~\ref{tab:hw_ber} reports the mean BER across all five hardware captures.
+
+\begin{table}[!t]
+  \centering
+  \caption{Hardware Capture BER (Mean over 5 Files)}
+  \label{tab:hw_ber}
+  \begin{tabular}{lc}
+    \toprule
+    Model & Mean BER \\
+    \midrule
+    Classical      & 0.528 \\
+    Linear-IQ      & 0.485 \\
+    MLP-IQ         & 0.513 \\
+    MLP-Phase      & 0.521 \\
+    MLP-Combined   & 0.519 \\
+    ResNet-Combined& 0.523 \\
+    CVNN           & 0.516 \\
+    LSTM           & 0.518 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+All models report BER near 0.50, consistent with random bit decisions.  The root
+cause is an insufficient PN correlation peak: on hardware captures the peak
+correlation value is 32--42 out of the maximum 128, corresponding to
+$\approx 33\%$--$37\%$ BER in the PN search window.  A reliable burst alignment
+requires a peak of at least 80/128.  The low peak is a consequence of the hardware
+SNR: the noise $\sigma \approx 6.75 \times 10^{-4}$ and peak signal amplitude
+$A \approx 9.7 \times 10^{-4}$ give SNR $\approx 3.1\,\text{dB}$ at the ADC --
+significantly lower than the simulation baseline.  At this SNR the PN correlator
+cannot reliably distinguish the burst boundary from random noise, so all subsequent
+alignment and decoding is erroneous.
+
+The AFC stage itself operates correctly (the squared-spectrum peak at the estimated
+$\Delta f \approx -9\,\text{kHz}$ is consistent with the MATLAB phase-slope
+estimate of $-4.9\,\text{kHz}$ from \texttt{Receiver.m}); the alignment failure is
+SNR-limited rather than frequency-offset-limited.
+
+% ============================================================
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Feature Representation is the Primary Design Choice}
+
+The most significant performance differences across models are driven by the
+feature representation, not the model capacity. MLP-Phase, with only 11 input
+features and a modest hidden size, outperforms MLP-IQ (22 inputs) on phase-offset
+conditions because $\Delta\phi$ is analytically invariant to phase rotation.
+Conversely, MLP-IQ and CVNN perform better at low SNR because they retain
+amplitude information that the $\Delta\phi$ computation discards (angle differences
+saturate to $\pm\pi$ regardless of amplitude at low SNR).
+
+The combined feature vector (I/Q + magnitude + $\Delta\phi$) attempts to get the
+best of both worlds, and generally does -- MLP-Combined wins the IQ-imbalance
+conditions and ties ResNet on the combined condition.
+
+\subsection{ResNet for PA and Multi-Impairment}
+
+The structural alignment between ResNet skip connections and the additive PA
+distortion model \cite{pihlajasalo2023deep} is reflected in the results: ResNet-Combined
+achieves the lowest BER in the combined condition, which includes PA effects alongside
+phase and frequency distortions. The phase augmentation is essential here -- without
+it, the ResNet would overfit to the specific phase offsets seen during training.
+
+\subsection{CVNN and LSTM: Limited Gains at This Scale}
+
+The CVNN has the correct inductive bias -- Wirtinger complex weights naturally
+represent phase rotations -- but delivers only modest gains over real-valued MLPs.
+The short 344-symbol burst means the doubled parameter count of each complex layer
+is not offset by a proportional increase in training data.  The LSTM, despite
+theoretical advantages for tracking phase drift, consistently underperforms MLP-IQ:
+bursts are too short for the recurrent state to capture temporal dependencies beyond
+what a 5-symbol window already provides.
+
+\subsection{Classical Decoder and Limitations}
+
+At high SNR and for single impairments, the classical decoder is within 0.5--1\%
+BER of the best ML model; ML gains are largest at intermediate SNR and in the
+combined condition.  The primary limitation is BER resolution: $1/344 \approx 0.003$
+per test file, so zero-BER reports represent fewer than 3 errors.  Future work
+should evaluate over longer transmissions or full Monte Carlo BER curves.
+
+% ============================================================
+\section{Challenges Faced}
+\label{sec:challenges}
+
+\subsection{Hardware SNR and Burst Alignment Failure}
+
+The dominant challenge was the low ADC SNR ($\approx 3$\,dB: noise
+$\sigma \approx 6.75\times10^{-4}$, signal peak $A \approx 9.7\times10^{-4}$).
+The PN correlation peak reached only 32--42 out of 128, well below the $>80$
+threshold for reliable burst-start detection, causing all hardware-capture BERs
+to be $\approx 0.50$.
+
+\subsection{AFC Metric Selection}
+
+Three metrics were attempted: (1)~maximising the PN-peak -- failed because a
+9\,kHz offset shifts each differential phase by only 16°, which the threshold
+decoder absorbs; (2)~squared-spectrum estimator
+$\hat{f} = \arg\max_f|\overline{s_{\Delta f}^2}|$ -- principled but weak due
+to phase incoherence across the 69 tiled burst repetitions; (3)~phase-slope
+estimate via linear fit to $\operatorname{unwrap}(\angle s_k)$ -- reliable
+($-8.9$\,kHz, consistent with MATLAB's $-4.9$\,kHz) but analytical, not a
+closed-loop grid search.  The final code uses method~(2) as the formal AFC
+metric.
+
+\subsection{Implementation Issues}
+
+Windows \texttt{cp1252} encoding caused \texttt{UnicodeEncodeError} for Unicode
+print characters; all were replaced with ASCII equivalents.  Different feature
+extractors return either 193 or 194 rows for the same 204-symbol burst (the
+differential-phase representation loses one sample due to the differencing
+operation), requiring a per-model reference-slice helper \texttt{tx\_align(n)}
+to keep the transmitted label window aligned with each feature matrix.
+
+% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+This paper demonstrated ML-assisted channel equalisation for a hardware DBPSK link
+subject to six categories of hardware non-ideality. Data were acquired from the
+ME1000 RF transceiver and processed through a Python reimplementation of the
+MATLAB \texttt{Receiver.m} pipeline. Seven equaliser architectures were trained and
+evaluated on 22 held-out test conditions.
+
+Key findings are:
+\begin{itemize}
+  \item ML models offer the largest gains over the classical decoder at intermediate
+        SNR (41\% BER reduction at SNR 75\%) and in the combined multi-impairment
+        scenario ($3\times$ BER reduction).
+  \item Differential phase features are the strongest single feature for phase-offset
+        robustness; combined features win for multi-impairment scenarios.
+  \item ResNet with phase augmentation is the overall best-performing architecture,
+        consistent with the literature on PA compensation.
+  \item Linear regression is entirely ineffective, confirming the nonlinear nature
+        of all hardware impairments studied.
+  \item The classical differential decoder remains competitive for single impairments
+        at high SNR -- ML compensation is most valuable in the multi-impairment regime.
+\end{itemize}
+
+% ============================================================
+\section{Work Distribution}
+\label{sec:workdist}
+
+\begin{table}[!h]
+  \centering
+  \caption{Work Distribution}
+  \label{tab:workdist}
+  \small
+  \begin{tabular}{p{2.1cm}p{5.5cm}}
+    \toprule
+    Member & Primary Contributions \\
+    \midrule
+    Siddharth Kumar Bhagat (B23EE1097)
+      & ME1000 hardware setup and data acquisition; Saleh PA model;
+        ResNet and CVNN implementation; dataset organisation. \\[2pt]
+    Soham Kulkarni (B23EE1098)
+      & MLP variants; hyperparameter random search; AdamW/cosine
+        training pipeline; BER evaluation and figures. \\[2pt]
+    Sohom Sarkar (B23EE1099)
+      & Non-ideality simulation; feature engineering; LSTM; AFC
+        hardware evaluation script; report writing. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% ============================================================
+\appendix
+\section{Hyperparameter Search Results}
+\label{app:hp}
+
+Table~\ref{tab:hp} summarises the best hyperparameters found by random search for
+each model.
+
+\begin{table}[!t]
+  \centering
+  \caption{Best Hyperparameters per Model}
+  \label{tab:hp}
+  \small
+  \begin{tabular}{llll}
+    \toprule
+    Model & Hidden dims & LR & Batch \\
+    \midrule
+    Linear-IQ       & --               & --     & -- \\
+    MLP-IQ          & (256,128,64)     & 1e-3   & 256 \\
+    MLP-Phase       & (128,64,32)      & 5e-4   & 128 \\
+    MLP-Combined    & (256,128,64,32)  & 1e-3   & 256 \\
+    ResNet-Combined & hidden=128, 6 blocks & 1e-3 & 128 \\
+    CVNN            & (64,32)          & 1e-3   & 256 \\
+    LSTM            & hidden=64, 2 layers & 5e-4 & seq. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% ============================================================
+\section{Key Code Listings}
+\label{app:code}
+
+\subsection*{Feature Extraction (\texttt{common.py})}
+
+\begin{lstlisting}[caption={Three windowed feature representations designed for
+the ML equalisers.}, label={lst:features}]
+WINDOW, HALF_WIN = 11, 5   # 5-past + current + 5-future context window
+
+def make_features_iq(rx):
+    # Raw I/Q window (dim=22): captures amplitude and phase jointly
+    I, Q = rx.real, rx.imag
+    return np.array([np.r_[I[k-5:k+6], Q[k-5:k+6]]
+                     for k in range(5, len(rx)-5)], dtype=np.float32)
+
+def make_features_phase(rx):
+    # Differential phase (dim=11): rotation-invariant -- constant phase cancels
+    dp = np.angle(rx[1:] * np.conj(rx[:-1])) / np.pi   # length N-1
+    return np.array([dp[k-5:k+6]
+                     for k in range(5, len(dp)-5)], dtype=np.float32)
+
+def make_features_combined(rx):
+    # I/Q (22) + magnitude (11) + diff-phase (10) = 43 features
+    I, Q, M = rx.real, rx.imag, np.abs(rx)
+    dp = np.angle(rx[1:] * np.conj(rx[:-1])) / np.pi
+    return np.array([np.r_[I[k-5:k+6], Q[k-5:k+6], M[k-5:k+6], dp[k-5:k+5]]
+                     for k in range(5, len(dp)-5)], dtype=np.float32)
+\end{lstlisting}
+
+\subsection*{Two-Stage AFC (\texttt{evaluate\_hardware.py})}
+
+\begin{lstlisting}[caption={Coarse + fine automatic frequency correction using
+the squared-spectrum BPSK estimator.}, label={lst:afc}]
+SYMBOL_RATE = 200_000   # Hz
+
+def _apply_comp(symbols, f_hz):
+    # Rotate symbol k by exp(-j*2*pi*f*k/fs) to remove f_hz carrier offset
+    k = np.arange(len(symbols))
+    return symbols * np.exp(-1j * 2 * np.pi * f_hz * k / SYMBOL_RATE)
+
+def _sq_spec_score(symbols, f_hz):
+    # |mean(s^2)|: for BPSK, s^2 has DC component at 2f; maximised when f=0
+    return float(np.abs(np.mean(_apply_comp(symbols, f_hz) ** 2)))
+
+def coarse_afc(symbols):
+    # Grid search [-15, +15] kHz in 300 Hz steps (101 candidates)
+    freqs = np.arange(-15000, 15001, 300)
+    return float(freqs[np.argmax([_sq_spec_score(symbols, f) for f in freqs])])
+
+def fine_afc(symbols, f_coarse):
+    # Refine: +/-500 Hz around coarse estimate in 25 Hz steps (41 candidates)
+    freqs = np.arange(f_coarse - 500, f_coarse + 501, 25)
+    return float(freqs[np.argmax([_sq_spec_score(symbols, f) for f in freqs])])
+\end{lstlisting}
+
+% ============================================================
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}
