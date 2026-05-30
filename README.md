@@ -1,4 +1,4 @@
-# ML-Assisted DBPSK Receiver -- Group 7
+# ML-Assisted DBPSK Receiver - Group 7
 
 ## Project Overview
 This project implements and evaluates machine-learning-based equalisers for a
